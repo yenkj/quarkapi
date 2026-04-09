@@ -397,6 +397,9 @@ app.post('/api/config', (req, res) => {
   if (quarkCookie !== undefined && quarkCookie !== '(已配置)') config.quarkCookie = quarkCookie;
   
   if (saveConfig(config)) {
+    console.log('\n配置已更新:');
+    console.log('  盘搜地址:', config.pansouHost || '(未配置)');
+    console.log('  夸克Cookie:', config.quarkCookie ? '(已配置)' : '(未配置)');
     res.json({ success: true, message: '配置已保存' });
   } else {
     res.status(500).json({ success: false, message: '保存配置失败' });
@@ -626,16 +629,15 @@ app.get('/api/tvbox/drive/quark', async (req, res) => {
 });
 
 app.get('/play/:quarkUrl/:index', async (req, res) => {
-  let page = null;
   try {
     const { quarkUrl, index } = req.params;
     const decodedUrl = decodeURIComponent(quarkUrl);
     
     log(`收到播放请求: ${decodedUrl.substring(0, 50)}... 索引: ${index}`);
     
-    const directLinks = await getDirectLink(decodedUrl);
+    const directLinks = await getDirectLink(decodedUrl, false);
     
-    if (directLinks.length > 0 && directLinks[index]) {
+    if (directLinks && directLinks.length > 0 && directLinks[index]) {
       const directLink = directLinks[index].url;
       log(`重定向到直链: ${directLink.substring(0, 80)}...`);
       return res.redirect(directLink);
@@ -650,10 +652,6 @@ app.get('/play/:quarkUrl/:index', async (req, res) => {
     return res.status(500).json({
       error: error.message
     });
-  } finally {
-    if (page) {
-      await page.close();
-    }
   }
 });
 
