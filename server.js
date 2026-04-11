@@ -1843,7 +1843,27 @@ app.get('/api.php/provide/vod', async (req, res) => {
                 const videos = playUrl.split('#').filter(v => v.trim());
                 if (videos.length > 0) {
                   const moviePlayUrls = videos.map((v, idx) => {
-                    const parts = v.split('
+                    const [name] = v.split('$');
+                    return {
+                      name: name,
+                      url: `${baseUrl}/quark/openlist?quarkurl=${encodeURIComponent(cleanUrl)}&filename=${encodeURIComponent(name)}`
+                    };
+                  });
+                  allPlayUrls.push(...moviePlayUrls);
+                }
+              }
+            } catch (error) {
+              log(`处理网盘 ${cleanUrl} 时出错: ${error.message}`);
+            }
+          }
+          
+          if (allPlayUrls.length > 0) {
+            allMovieLinks.push({
+              title: shareInfo.vod_name || '未知电影',
+              playUrls: allPlayUrls
+            });
+          }
+        } else {
           log(`进入剧集分支`);
           let episodeMap = new Map();
           
