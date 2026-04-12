@@ -710,40 +710,48 @@ app.get('/api/quark/check-login', async (req, res) => {
   }
 });
 
-app.get('/api/tvbox/drive/quark', async (req, res) => {
+app.get('/api.php/provide/vod', async (req, res) => {
   try {
-    const { ac, ids } = req.query;
+    const { ac, ids, wd } = req.query;
     
-    if (ac !== 'detail' || !ids) {
+    if (ac === 'search' && wd) {
       return res.json({ code: 0, list: [] });
     }
     
-    const shareUrl = ids;
-    const quark = getQuarkInstance();
-    if (!quark) {
+    if (ac === 'detail' && ids) {
+      let shareUrl = ids;
+      
+      if (shareUrl.startsWith('all:')) {
+        shareUrl = shareUrl.replace('all:', '');
+      }
+      
+      const quark = getQuarkInstance();
+      if (!quark) {
+        return res.json({ code: 0, list: [] });
+      }
+      
+      try {
+        const shareInfo = await quark.getShareInfo(shareUrl);
+        
+        if (shareInfo) {
+          shareInfo.vod_play_url = shareInfo.vod_play_url.split('#').map(part => {
+            const [name, fid] = part.split('$');
+            if (name && fid) {
+              return `${name}$${getBaseUrl(req)}/api/quark/play?url=${encodeURIComponent(shareUrl)}&fid=${fid}`;
+            }
+            return part;
+          }).join('#');
+          
+          return res.json({ code: 1, list: [shareInfo] });
+        }
+      } catch (error) {
+        console.error('获取分享信息失败:', error);
+      }
+      
       return res.json({ code: 0, list: [] });
     }
     
-    const { videoFiles } = await quark.getVideoFiles(shareUrl);
-    if (videoFiles.length === 0) {
-      return res.json({ code: 0, list: [] });
-    }
-    
-    const isMovie = videoFiles.length === 1;
-    const vodName = videoFiles[0]?.fileName || '视频';
-    
-    const vod = {
-      vod_id: shareUrl,
-      vod_name: vodName,
-      vod_pic: '',
-      vod_remarks: isMovie ? '电影' : '剧集',
-      type_name: '夸克网盘',
-      vod_play_url: videoFiles.map((item, index) => {
-        return `${item.name}$${getBaseUrl(req)}/api/quark/play?url=${encodeURIComponent(shareUrl)}&index=${index}`;
-      }).join('#')
-    };
-    
-    res.json({ code: 1, list: [vod] });
+    res.json({ code: 0, list: [] });
   } catch (error) {
     res.json({ code: 0, list: [] });
   }
@@ -850,7 +858,7 @@ app.get('/api/quark/direct-link', async (req, res) => {
 
 app.get('/api/quark/play', async (req, res) => {
   try {
-    const { url, index } = req.query;
+    const { url, index, fid } = req.query;
     if (!url) {
       return res.json({ success: false, message: '缺少 url 参数' });
     }
@@ -868,10 +876,16 @@ app.get('/api/quark/play', async (req, res) => {
       return res.json({ success: false, message: '未找到视频文件' });
     }
     
-    const idx = parseInt(index) || 0;
-    const targetFile = videoFiles[idx];
+    let targetFile;
+    if (fid) {
+      targetFile = videoFiles.find(f => f.fid === fid);
+    } else {
+      const idx = parseInt(index) || 0;
+      targetFile = videoFiles[idx];
+    }
+    
     if (!targetFile) {
-      return res.json({ success: false, message: '索引不存在' });
+      return res.json({ success: false, message: '未找到目标文件' });
     }
     
     if (openlistConfig.url && openlistConfig.username && openlistConfig.password && openlistConfig.tempPath) {
@@ -912,8 +926,17 @@ app.get('/api/quark/play', async (req, res) => {
       }
     } else {
       const result = await quark.getDirectLink(url);
-      if (result.success && result.data && result.data.length > idx) {
-        return res.redirect(result.data[idx].url);
+      if (result.success && result.data) {
+        let targetLink;
+        if (fid) {
+          targetLink = result.data.find(d => d.fid === fid);
+        } else {
+          const idx = parseInt(index) || 0;
+          targetLink = result.data[idx];
+        }
+        if (targetLink) {
+          return res.redirect(targetLink.url);
+        }
       }
     }
     
