@@ -6,6 +6,7 @@ const path = require('path');
 const QuarkDirectLink = require('./quark');
 
 const tokenCache = new Map();
+let openListSingleton = null;
 
 class OpenListClient {
   constructor(baseURL, username, password) {
@@ -151,6 +152,28 @@ class OpenListClient {
     return response.json();
   }
 
+  async refreshDirectory(path) {
+    try {
+      const response = await this.fetchWithRetry(`${this.baseURL}/api/fs/list`, {
+        method: 'POST',
+        headers: await this.getHeaders(),
+        body: JSON.stringify({
+          path,
+          password: '',
+          refresh: true,
+          page: 1,
+          per_page: 1,
+        }),
+      });
+
+      if (!response.ok) {
+        console.warn(`刷新目录缓存失败: ${response.status}`);
+      }
+    } catch (error) {
+      console.warn('刷新目录缓存失败:', error);
+    }
+  }
+
   async pathExists(path) {
     try {
       const response = await this.listDirectory(path, 1, 1);
@@ -192,7 +215,10 @@ function getOpenListInstance() {
   if (!openlistConfig.url || !openlistConfig.username || !openlistConfig.password) {
     return null;
   }
-  return new OpenListClient(openlistConfig.url, openlistConfig.username, openlistConfig.password);
+  if (!openListSingleton) {
+    openListSingleton = new OpenListClient(openlistConfig.url, openlistConfig.username, openlistConfig.password);
+  }
+  return openListSingleton;
 }
 
 function saveConfig(config) {
@@ -808,7 +834,10 @@ app.get('/api.php/provide/vod', async (req, res) => {
       
       const searchResponse = await fetch(pansouApi, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+        },
         body: JSON.stringify({
           kw: wd,
           res: 'merge',
@@ -817,6 +846,7 @@ app.get('/api.php/provide/vod', async (req, res) => {
       });
       
       const searchData = await searchResponse.json();
+      log(`盘搜响应: ${JSON.stringify(searchData, null, 2).substring(0, 800)}`);
       const vodList = [];
       
       if (searchData.data && searchData.data.merged_by_type && searchData.data.merged_by_type.quark) {
@@ -1372,12 +1402,14 @@ app.get('/api/quark/play', async (req, res) => {
       log(`[play] 使用 episode 选择: ${episodeNum}`);
     } else {
       const idx = parseInt(index) || 0;
-      targetFile = videoFiles[idx];
-      log(`[play] 使用 index 选择: ${idx}`);
+      // 防止 idx 越界
+      const safeIdx = Math.max(0, Math.min(idx, videoFiles.length - 1));
+      targetFile = videoFiles[safeIdx];
+      log(`[play] 使用 index 选择: ${safeIdx} (原始: ${idx})`);
     }
     
     if (!targetFile) {
-      return res.json({ success: false, message: '未找到目标文件' });
+      targetFile = videoFiles[0]; // 兜底
     }
     
     log(`[play] 目标文件: ${targetFile.fileName} (fid: ${targetFile.fid})`);
@@ -1408,6 +1440,9 @@ app.get('/api/quark/play', async (req, res) => {
       
       const savedFid = taskInfo.save_as.save_as_top_fids[0];
       const openlistFilePath = path.join(openlistConfig.tempPath, targetFile.fileName);
+      
+      log(`[play] 刷新 OpenList 目录: ${openlistConfig.tempPath}`);
+      await openlist.refreshDirectory(openlistConfig.tempPath);
       
       log(`[play] 尝试从 OpenList 获取直链: ${openlistFilePath}`);
       try {
