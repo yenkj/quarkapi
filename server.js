@@ -1117,8 +1117,9 @@ app.get('/api.php/provide/vod', async (req, res) => {
           
           for (let i = 0; i < allUrls.length; i++) {
             const cleanUrl = allUrls[i];
-            const moviePlayUrl = `${wd}.${i + 1}.mp4$${baseUrl}/api/quark/play?url=${encodeURIComponent(cleanUrl)}&index=0`;
+            const moviePlayUrl = `${wd}.${i + 1}.mp4${baseUrl}/api/quark/play?url=${encodeURIComponent(cleanUrl)}&index=0`;
             allMovieUrls.push(moviePlayUrl);
+            allMovieLinks.push(moviePlayUrl); // 同时给 allMovieLinks 赋值，用于日志
           }
           
           sortedEpisodes = allMovieUrls.join('#');
