@@ -1080,23 +1080,19 @@ app.get('/api.php/provide/vod', async (req, res) => {
         
         if (isMovie) {
           log(`进入电影分支`);
+          log(`跳过直链获取，使用构造的播放地址`);
+          
+          const baseUrl = getBaseUrl(req);
+          const allMovieUrls = [];
           
           for (let i = 0; i < allUrls.length; i++) {
             const cleanUrl = allUrls[i];
-            log(`获取第 ${i + 1}/${allUrls.length} 个网盘直链: ${cleanUrl.substring(0, 40)}...`);
-            
-            try {
-              const directLinksRes = await fetch(`${getBaseUrl(req)}/api/quark/direct-link?url=${encodeURIComponent(cleanUrl)}`);
-              const directLinksData = await directLinksRes.json();
-              if (directLinksData.success && directLinksData.data) {
-                allMovieLinks.push(...directLinksData.data);
-              }
-            } catch (error) {
-              log(`获取网盘直链失败: ${error.message}`);
-            }
+            const moviePlayUrl = `${wd}.${i + 1}.mp4$${baseUrl}/api/quark/play?url=${encodeURIComponent(cleanUrl)}&index=0`;
+            allMovieUrls.push(moviePlayUrl);
           }
           
-          sortedEpisodes = allMovieLinks.slice(0, 10).map(item => `${item.name}$${item.url}`).join('#');
+          sortedEpisodes = allMovieUrls.join('#');
+          log(`构建电影播放地址完成，共 ${allMovieUrls.length} 个资源`);
         } else {
           log(`进入剧集分支`);
           let episodeMap = new Map();
@@ -1339,6 +1335,8 @@ app.get('/api/quark/direct-link', async (req, res) => {
 app.get('/api/quark/play', async (req, res) => {
   try {
     const { url, index, fid, episode } = req.query;
+    log(`[play] 收到播放请求: url=${url}, index=${index}, fid=${fid}, episode=${episode}`);
+    
     if (!url) {
       return res.json({ success: false, message: '缺少 url 参数' });
     }
@@ -1352,6 +1350,8 @@ app.get('/api/quark/play', async (req, res) => {
     const openlist = getOpenListInstance();
     
     const { videoFiles, stoken } = await quark.getVideoFiles(url);
+    log(`[play] 找到 ${videoFiles.length} 个视频文件`);
+    
     if (videoFiles.length === 0) {
       return res.json({ success: false, message: '未找到视频文件' });
     }
@@ -1359,6 +1359,7 @@ app.get('/api/quark/play', async (req, res) => {
     let targetFile;
     if (fid) {
       targetFile = videoFiles.find(f => f.fid === fid);
+      log(`[play] 使用 fid 选择: ${fid}`);
     } else if (episode !== undefined) {
       const episodeNum = parseInt(episode);
       targetFile = videoFiles.find(f => {
@@ -1368,16 +1369,22 @@ app.get('/api/quark/play', async (req, res) => {
       if (!targetFile) {
         targetFile = videoFiles[0];
       }
+      log(`[play] 使用 episode 选择: ${episodeNum}`);
     } else {
       const idx = parseInt(index) || 0;
       targetFile = videoFiles[idx];
+      log(`[play] 使用 index 选择: ${idx}`);
     }
     
     if (!targetFile) {
       return res.json({ success: false, message: '未找到目标文件' });
     }
     
+    log(`[play] 目标文件: ${targetFile.fileName} (fid: ${targetFile.fid})`);
+    
     if (openlistConfig.url && openlistConfig.username && openlistConfig.password && openlistConfig.tempPath) {
+      log(`[play] 使用 OpenList 直链`);
+      
       const quarkSavePath = config.quarkPlayTempSavePath || '/quarkapi';
       const saveFolderId = await quark.findOrCreateSaveFolder(quarkSavePath);
       
@@ -1385,12 +1392,14 @@ app.get('/api/quark/play', async (req, res) => {
       const fidTokens = [targetFile.shareFidToken];
       const pwdId = quark.extractPwdId(url);
       
+      log(`[play] 开始转存文件到夸克...`);
       const saveResult = await quark.saveShareFiles(pwdId, stoken, fids, fidTokens, saveFolderId);
       
       if (!saveResult.task_id) {
         throw new Error('转存任务创建失败');
       }
       
+      log(`[play] 等待转存任务完成...`);
       const taskInfo = await quark.waitForTask(saveResult.task_id);
       
       if (!taskInfo.save_as || !taskInfo.save_as.save_as_top_fids || taskInfo.save_as.save_as_top_fids.length === 0) {
@@ -1400,20 +1409,26 @@ app.get('/api/quark/play', async (req, res) => {
       const savedFid = taskInfo.save_as.save_as_top_fids[0];
       const openlistFilePath = path.join(openlistConfig.tempPath, targetFile.fileName);
       
+      log(`[play] 尝试从 OpenList 获取直链: ${openlistFilePath}`);
       try {
         const fileInfo = await openlist.getFile(openlistFilePath);
         if (fileInfo.code === 200 && fileInfo.data && fileInfo.data.raw_url) {
+          log(`[play] OpenList 直链成功: ${fileInfo.data.raw_url.substring(0, 80)}...`);
+          log(`[play] 302 重定向到 OpenList 直链`);
           return res.redirect(fileInfo.data.raw_url);
         }
       } catch (error) {
-        console.error('从 OpenList 获取直链失败:', error.message);
+        console.error('[play] 从 OpenList 获取直链失败:', error.message);
       }
       
+      log(`[play] OpenList 直链失败，使用夸克下载链接`);
       const downloadInfo = await quark.getDownloadUrl([savedFid]);
       if (downloadInfo.length > 0) {
+        log(`[play] 302 重定向到夸克下载链接: ${downloadInfo[0].downloadUrl.substring(0, 80)}...`);
         return res.redirect(downloadInfo[0].downloadUrl);
       }
     } else {
+      log(`[play] 使用夸克直接链接`);
       const result = await quark.getDirectLink(url);
       if (result.success && result.data) {
         let targetLink;
@@ -1433,6 +1448,7 @@ app.get('/api/quark/play', async (req, res) => {
           targetLink = result.data[idx];
         }
         if (targetLink) {
+          log(`[play] 302 重定向到夸克直链: ${targetLink.url.substring(0, 80)}...`);
           return res.redirect(targetLink.url);
         }
       }
@@ -1440,6 +1456,7 @@ app.get('/api/quark/play', async (req, res) => {
     
     res.json({ success: false, message: '无法获取直链' });
   } catch (error) {
+    log(`[play] 错误: ${error.message}`);
     res.json({ success: false, message: error.message });
   }
 });
