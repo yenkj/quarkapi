@@ -311,6 +311,74 @@ setInterval(async () => {
   }
 }, 24 * 60 * 60 * 1000);
 
+const CHINESE_NUM_MAP = {
+  '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+  '六': 6, '七': 7, '八': 8, '九': 9, '十': 10
+};
+
+function getBaseUrl(req) {
+  const host = req.get('host') || 'localhost:3000';
+  return `http://${host}`;
+}
+
+function extractEpisodeNumber(filename) {
+  if (!filename) return null;
+  
+  const name = filename.toLowerCase();
+  
+  const patterns = [
+    /s\d+e(\d+)/i,
+    /ep(\d+)/i,
+    /第([一二三四五六七八九十\d]+)集/,
+    /^(\d+)[\s\-_]/,
+    /^(\d+)\./,
+    /(\d+)\.(mp4|mkv|avi|wmv|flv|mov|m4v)$/,
+    /ep(\d+)/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = name.match(pattern);
+    if (match) {
+      const numStr = match[1];
+      const num = CHINESE_NUM_MAP[numStr] || parseInt(numStr);
+      if (!isNaN(num) && num > 0) {
+        return num;
+      }
+    }
+  }
+  
+  return null;
+}
+
+function extractEpisodeNumberDetail(filename) {
+  if (!filename) return null;
+  
+  const name = filename.toLowerCase();
+  
+  const patterns = [
+    /s\d+e(\d+)/i,
+    /ep(\d+)/i,
+    /第([一二三四五六七八九十\d]+)集/,
+    /^\[.*?\]\s*(\d+)[\s\-_]/,
+    /^(\d+)[\s\-_]/,
+    /^(\d+)\./,
+    /ep(\d+)/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = name.match(pattern);
+    if (match) {
+      const numStr = match[1];
+      const num = CHINESE_NUM_MAP[numStr] || parseInt(numStr);
+      if (!isNaN(num) && num > 0) {
+        return num;
+      }
+    }
+  }
+  
+  return null;
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -712,17 +780,416 @@ app.get('/api/quark/check-login', async (req, res) => {
 
 app.get('/api.php/provide/vod', async (req, res) => {
   try {
-    const { ac, ids, wd } = req.query;
+    const { ac, wd, ids } = req.query;
     
-    if (ac === 'search' && wd) {
-      return res.json({ code: 0, list: [] });
-    }
-    
-    if (ac === 'detail' && ids) {
+    if (ac === 'search') {
+      if (!wd) {
+        return res.json({
+          code: 0,
+          msg: '缺少搜索关键词',
+          list: []
+        });
+      }
+      
+      const cacheKey = `search:${wd}`;
+      const cachedResult = cache[cacheKey];
+      
+      if (cachedResult && Date.now() - cachedResult.timestamp < 3600000) {
+        log(`使用搜索缓存: ${wd}`);
+        return res.json(cachedResult.data);
+      }
+      
+      const pansouHost = getPansouHost();
+      if (!pansouHost) {
+        return res.json({ code: 0, list: [] });
+      }
+      
+      const pansouApi = `${pansouHost}/api/search`;
+      
+      const searchResponse = await fetch(pansouApi, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kw: wd,
+          res: 'merge',
+          limit: 10
+        })
+      });
+      
+      const searchData = await searchResponse.json();
+      const vodList = [];
+      
+      if (searchData.data && searchData.data.merged_by_type && searchData.data.merged_by_type.quark) {
+        const allItems = searchData.data.merged_by_type.quark;
+        const maxValidItems = 5;
+        
+        log(`搜索到 ${allItems.length} 个结果，开始验证...`);
+        
+        const validItems = [];
+        
+        for (let i = 0; i < allItems.length && validItems.length < maxValidItems; i++) {
+          const item = allItems[i];
+          const cleanUrl = (item.url || '').trim().replace(/^`|`$/g, '');
+          
+          if (invalidLinks[cleanUrl]) {
+            log(`跳过失效链接: ${cleanUrl.substring(0, 40)}...`);
+            continue;
+          }
+          
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            
+            const detailUrl = `${getBaseUrl(req)}/api.php/provide/vod?ac=detail&ids=${encodeURIComponent(cleanUrl)}`;
+            log(`验证第 ${i + 1}/${allItems.length} 个链接: ${cleanUrl.substring(0, 40)}...`);
+            
+            const detailResponse = await fetch(detailUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            
+            log(`收到响应，状态: ${detailResponse.status}`);
+            
+            const detailData = await detailResponse.json();
+            
+            if (detailData.list && detailData.list.length > 0) {
+              const videoDetail = detailData.list[0];
+              const playUrl = videoDetail.vod_play_url || '';
+              
+              if (playUrl) {
+                const videos = playUrl.split('#').filter(v => v.trim());
+                if (videos.length > 0) {
+                  validItems.push(item);
+                  log(`有效: ${cleanUrl.substring(0, 40)}... (${videos.length}个视频)`);
+                } else {
+                  invalidLinks[cleanUrl] = Date.now();
+                  log(`失效: ${cleanUrl.substring(0, 40)}... (无视频)`);
+                }
+              } else {
+                invalidLinks[cleanUrl] = Date.now();
+                log(`失效: ${cleanUrl.substring(0, 40)}... (无播放地址)`);
+              }
+            } else {
+              invalidLinks[cleanUrl] = Date.now();
+              log(`失效: ${cleanUrl.substring(0, 40)}... (未找到详情)`);
+            }
+          } catch (error) {
+            invalidLinks[cleanUrl] = Date.now();
+            log(`失效: ${cleanUrl.substring(0, 40)}... (${error.message})`);
+          }
+        }
+        
+        log(`验证完成，找到 ${validItems.length} 个有效网盘`);
+        
+        const allUrls = validItems.map(item => (item.url || '').trim().replace(/^`|`$/g, ''));
+        const firstUrl = allUrls.length > 0 ? allUrls[0] : '';
+        
+        let isMovie = true;
+        
+        if (firstUrl) {
+          try {
+            const detailUrl = `${getBaseUrl(req)}/api.php/provide/vod?ac=detail&ids=${encodeURIComponent(firstUrl)}`;
+            const detailResponse = await fetch(detailUrl);
+            const detailData = await detailResponse.json();
+            
+            if (detailData.list && detailData.list.length > 0) {
+              const videoDetail = detailData.list[0];
+              const playUrl = videoDetail.vod_play_url || '';
+              
+              if (playUrl) {
+                const videos = playUrl.split('#').filter(v => v.trim());
+                for (const video of videos) {
+                  const [name] = video.split('$');
+                  const episodeNum = extractEpisodeNumberDetail(name);
+                  if (episodeNum !== null) {
+                    isMovie = false;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            log(`识别类型失败: ${error.message}`);
+          }
+        }
+        
+        log(`识别为${isMovie ? '电影' : '剧集'}`);
+        
+        const quarkPlayUrls = [];
+        
+        log(`开始获取 ${validItems.length} 个网盘的详情`);
+        
+        for (let i = 0; i < validItems.length; i++) {
+          const item = validItems[i];
+          const cleanUrl = (item.url || '').trim().replace(/^`|`$/g, '');
+          
+          log(`处理第 ${i + 1}/${validItems.length} 个网盘: ${cleanUrl.substring(0, 40)}...`);
+          
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            
+            const detailUrl = `${getBaseUrl(req)}/api.php/provide/vod?ac=detail&ids=${encodeURIComponent(cleanUrl)}`;
+            log(`请求详情: ${detailUrl.substring(0, 60)}...`);
+            
+            const detailResponse = await fetch(detailUrl, { signal: controller.signal });
+            clearTimeout(timeout);
+            
+            log(`收到响应，状态: ${detailResponse.status}`);
+            
+            const detailData = await detailResponse.json();
+            
+            if (detailData.list && detailData.list.length > 0) {
+              const videoDetail = detailData.list[0];
+              const playUrl = videoDetail.vod_play_url || '';
+              log(`获取到播放地址，长度: ${playUrl.length}`);
+              quarkPlayUrls.push({
+                quarkUrl: cleanUrl,
+                playUrl: playUrl
+              });
+            } else {
+              log(`未找到详情数据`);
+            }
+          } catch (error) {
+            log(`获取详情失败: ${error.message}`);
+            quarkPlayUrls.push({
+              quarkUrl: cleanUrl,
+              playUrl: ''
+            });
+          }
+        }
+        
+        log(`网盘详情获取完成，共 ${quarkPlayUrls.length} 个有效网盘`);
+        
+        cache[`${cacheKey}:all`] = {
+          timestamp: Date.now(),
+          data: allUrls,
+          isMovie: isMovie,
+          quarkPlayUrls: quarkPlayUrls
+        };
+        
+        log(`保存缓存: ${cacheKey}:all, isMovie: ${isMovie}`);
+        
+        for (let i = 0; i < validItems.length; i++) {
+          const item = validItems[i];
+          const cleanUrl = (item.url || '').trim().replace(/^`|`$/g, '');
+          
+          const baseItem = {
+            vod_id: cleanUrl,
+            vod_name: (item.note || wd).trim(),
+            vod_pic: (item.images?.[0] || '').trim().replace(/^`|`$/g, ''),
+            vod_remarks: item.datetime || '',
+            vod_play_from: 'quark',
+            vod_password: (item.password || '').trim()
+          };
+          
+          try {
+            const detailUrl = `${getBaseUrl(req)}/api.php/provide/vod?ac=detail&ids=${encodeURIComponent(cleanUrl)}`;
+            const detailResponse = await fetch(detailUrl);
+            const detailData = await detailResponse.json();
+            
+            if (detailData.list && detailData.list.length > 0) {
+              const videoDetail = detailData.list[0];
+              const playUrl = videoDetail.vod_play_url || '';
+              
+              if (playUrl) {
+                const videos = playUrl.split('#').filter(v => v.trim());
+                const videoCount = videos.length;
+                
+                const baseUrl = getBaseUrl(req);
+                const fakePlayUrls = videos.map((v, idx) => {
+                  const parts = v.split('$');
+                  const name = parts[0] || `视频${idx + 1}`;
+                  return `${name}$${baseUrl}/api/quark/play?url=${encodeURIComponent(cleanUrl)}&index=${idx}`;
+                }).join('#');
+                
+                const resultItem = {
+                  ...baseItem,
+                  vod_play_url: fakePlayUrls,
+                  vod_remarks: `${item.datetime || ''} (${videoCount}个视频)`
+                };
+                vodList.push(resultItem);
+              }
+            }
+          } catch (error) {
+          }
+        }
+        
+        const baseUrl = getBaseUrl(req);
+        const allItem = {
+          vod_id: `all:${wd}`,
+          vod_name: `${wd}`,
+          vod_pic: '',
+          vod_remarks: `共${validItems.length}个网盘`,
+          vod_play_from: 'quark',
+          vod_password: '',
+          vod_play_url: `${wd}.1080p.mp4$${baseUrl}/api.php/provide/vod?ac=detail&ids=all:${wd}`
+        };
+        
+        vodList.unshift(allItem);
+      }
+      
+      const result = {
+        code: 1,
+        msg: '数据列表',
+        page: 1,
+        pagecount: 1,
+        limit: 10,
+        total: vodList.length,
+        list: vodList
+      };
+      
+      cache[cacheKey] = {
+        timestamp: Date.now(),
+        data: result
+      };
+      
+      return res.json(result);
+      
+    } else if (ac === 'detail') {
+      if (!ids) {
+        return res.json({
+          code: 0,
+          msg: '缺少ID',
+          list: []
+        });
+      }
+      
+      if (ids.startsWith('all:')) {
+        const searchKeyword = ids.substring(4);
+        const cacheKey = `search:${searchKeyword}`;
+        const cachedResult = cache[`${cacheKey}:all`];
+        
+        log(`读取缓存: ${cacheKey}:all, isMovie: ${cachedResult?.isMovie}`);
+        
+        if (!cachedResult) {
+          return res.json({
+            code: 0,
+            msg: '未找到搜索结果',
+            list: []
+          });
+        }
+        
+        const allUrls = cachedResult.data;
+        const isMovie = cachedResult.isMovie !== undefined ? cachedResult.isMovie : true;
+        const quarkPlayUrls = cachedResult.quarkPlayUrls || [];
+        
+        log(`获取所有网盘直链，共 ${allUrls.length} 个网盘，类型: ${isMovie ? '电影' : '剧集'}`);
+        log(`quarkPlayUrls 数量: ${quarkPlayUrls.length}`);
+        
+        let sortedEpisodes;
+        const allMovieLinks = [];
+        
+        if (isMovie) {
+          log(`进入电影分支`);
+          
+          for (let i = 0; i < allUrls.length; i++) {
+            const cleanUrl = allUrls[i];
+            log(`获取第 ${i + 1}/${allUrls.length} 个网盘直链: ${cleanUrl.substring(0, 40)}...`);
+            
+            try {
+              const directLinksRes = await fetch(`${getBaseUrl(req)}/api/quark/direct-link?url=${encodeURIComponent(cleanUrl)}`);
+              const directLinksData = await directLinksRes.json();
+              if (directLinksData.success && directLinksData.data) {
+                allMovieLinks.push(...directLinksData.data);
+              }
+            } catch (error) {
+              log(`获取网盘直链失败: ${error.message}`);
+            }
+          }
+          
+          sortedEpisodes = allMovieLinks.slice(0, 10).map(item => `${item.name}$${item.url}`).join('#');
+        } else {
+          log(`进入剧集分支`);
+          let episodeMap = new Map();
+          
+          log(`开始遍历 quarkPlayUrls`);
+          for (const quarkPlay of quarkPlayUrls) {
+            const { quarkUrl, playUrl } = quarkPlay;
+            
+            log(`处理网盘: ${quarkUrl.substring(0, 40)}..., playUrl 长度: ${playUrl ? playUrl.length : 0}`);
+            
+            if (!playUrl) {
+              log(`跳过空 playUrl`);
+              continue;
+            }
+            
+            const videos = playUrl.split('#').filter(v => v.trim());
+            log(`找到 ${videos.length} 个视频`);
+            
+            for (const video of videos) {
+              const [name] = video.split('$');
+              const episodeNum = extractEpisodeNumberDetail(name);
+              
+              if (episodeNum !== null) {
+                const existingEntries = Array.from(episodeMap.entries())
+                  .filter(([key, data]) => data.quarkUrl === quarkUrl && data.episodeNum === episodeNum);
+                
+                const version = existingEntries.length + 1;
+                const key = `${quarkUrl}:${name}`;
+                if (!episodeMap.has(key)) {
+                  episodeMap.set(key, {
+                    firstEpisodeUrl: null,
+                    quarkUrl: quarkUrl,
+                    episodeNum: episodeNum,
+                    version: version
+                  });
+                  log(`添加集数: ${episodeNum} 版本${version} (网盘: ${quarkUrl.substring(0, 40)}...)`);
+                }
+              }
+            }
+          }
+          
+          log(`episodeMap 大小: ${episodeMap.size}`);
+          
+          log(`跳过所有直链获取，全部使用构造的播放地址`);
+          
+          log(`开始构建播放地址`);
+          const baseUrl = getBaseUrl(req);
+          const uniqueQuarkUrls = new Set();
+          episodeMap.forEach(data => uniqueQuarkUrls.add(data.quarkUrl));
+          
+          const allPlayUrls = [];
+          
+          for (const quarkUrl of uniqueQuarkUrls) {
+            const episodesForQuark = Array.from(episodeMap.entries())
+              .filter(([_, data]) => data.quarkUrl === quarkUrl)
+              .sort((a, b) => a[1].episodeNum - b[1].episodeNum)
+              .map(([_, data]) => {
+                  const paddedNum = data.episodeNum.toString().padStart(2, '0');
+                if (data.version === 1) {
+                  return `第${paddedNum}集$${baseUrl}/api/quark/play?url=${encodeURIComponent(data.quarkUrl)}&episode=${data.episodeNum}`;
+                } else {
+                  return `第${paddedNum}集$${baseUrl}/api/quark/play?url=${encodeURIComponent(data.quarkUrl)}&episode=${data.episodeNum}&version=${data.version}`;
+                }
+                });
+            
+            allPlayUrls.push(episodesForQuark.join('#'));
+          }
+          
+          sortedEpisodes = allPlayUrls.join('$$$');
+          log(`构建播放地址完成，共 ${uniqueQuarkUrls.size} 个网盘，${episodeMap.size} 个集数`);
+          log(`共获取 ${uniqueQuarkUrls.size} 个网盘资源`);
+        }
+        
+        if (isMovie) {
+          log(`共获取 ${allMovieLinks?.length || 0} 个电影资源`);
+        }
+        
+        return res.json({
+          code: 1,
+          msg: '数据详情',
+          list: [{
+            vod_id: ids,
+            vod_play_from: 'quark',
+            vod_play_url: sortedEpisodes
+          }]
+        });
+      }
+      
       let shareUrl = ids;
       
-      if (shareUrl.startsWith('all:')) {
-        shareUrl = shareUrl.replace('all:', '');
+      if (ids.includes('/play/')) {
+        shareUrl = ids.split('/play/')[1].split('/')[0];
+        shareUrl = decodeURIComponent(shareUrl);
       }
       
       const quark = getQuarkInstance();
@@ -751,9 +1218,22 @@ app.get('/api.php/provide/vod', async (req, res) => {
       return res.json({ code: 0, list: [] });
     }
     
-    res.json({ code: 0, list: [] });
+    if (!res.headersSent) {
+      return res.json({
+        code: 0,
+        msg: '缺少ac参数',
+        list: []
+      });
+    }
+    
   } catch (error) {
-    res.json({ code: 0, list: [] });
+    if (!res.headersSent) {
+      return res.json({
+        code: 0,
+        msg: error.message,
+        list: []
+      });
+    }
   }
 });
 
@@ -858,7 +1338,7 @@ app.get('/api/quark/direct-link', async (req, res) => {
 
 app.get('/api/quark/play', async (req, res) => {
   try {
-    const { url, index, fid } = req.query;
+    const { url, index, fid, episode } = req.query;
     if (!url) {
       return res.json({ success: false, message: '缺少 url 参数' });
     }
@@ -879,6 +1359,15 @@ app.get('/api/quark/play', async (req, res) => {
     let targetFile;
     if (fid) {
       targetFile = videoFiles.find(f => f.fid === fid);
+    } else if (episode !== undefined) {
+      const episodeNum = parseInt(episode);
+      targetFile = videoFiles.find(f => {
+        const epNum = extractEpisodeNumber(f.fileName);
+        return epNum === episodeNum;
+      });
+      if (!targetFile) {
+        targetFile = videoFiles[0];
+      }
     } else {
       const idx = parseInt(index) || 0;
       targetFile = videoFiles[idx];
@@ -930,6 +1419,15 @@ app.get('/api/quark/play', async (req, res) => {
         let targetLink;
         if (fid) {
           targetLink = result.data.find(d => d.fid === fid);
+        } else if (episode !== undefined) {
+          const episodeNum = parseInt(episode);
+          targetLink = result.data.find(d => {
+            const epNum = extractEpisodeNumber(d.name);
+            return epNum === episodeNum;
+          });
+          if (!targetLink) {
+            targetLink = result.data[0];
+          }
         } else {
           const idx = parseInt(index) || 0;
           targetLink = result.data[idx];
