@@ -39,6 +39,33 @@ class QuarkDirectLink {
     this.headers = { ...DEFAULT_HEADERS, Cookie: cookie };
   }
 
+  async validateCookie() {
+    try {
+      const url = `${QUARK_PC_API}/file/sort`;
+      const t = Date.now();
+      
+      const params = new URLSearchParams({
+        ...BASE_PARAMS,
+        pdir_fid: '0',
+        _page: '1',
+        _size: '1',
+        __dt: String(t % 1000),
+        __t: String(t)
+      });
+
+      const response = await fetch(`${url}?${params}`, {
+        method: 'GET',
+        headers: this.headers
+      });
+
+      const data = await response.json();
+      
+      return data.code === 0;
+    } catch (error) {
+      return false;
+    }
+  }
+
   extractPwdId(shareUrl) {
     const match = shareUrl.match(/pan\.quark\.cn\/s\/([a-zA-Z0-9]+)/);
     if (match) return match[1];
@@ -141,38 +168,47 @@ class QuarkDirectLink {
     return data.data;
   }
 
-  async findOrCreateSaveFolder() {
-    const folderName = 'quarkapi';
+  async findOrCreateSaveFolder(folderPath = '/quarkapi') {
+    const pathParts = folderPath.split('/').filter(Boolean);
     
-    const url = `${QUARK_PC_API}/file/sort`;
-    const params = new URLSearchParams({
-      ...BASE_PARAMS,
-      pdir_fid: '0',
-      _page: '1',
-      _size: '100',
-      _sort: 'file_type:asc,updated_at:desc'
-    });
-
-    const response = await fetch(`${url}?${params}`, {
-      method: 'GET',
-      headers: this.headers
-    });
-
-    const data = await response.json();
+    let currentPdirFid = '0';
+    let currentFolderName = '';
     
-    if (data.code !== 0) {
-      throw new Error(data.message || '获取文件列表失败');
+    for (const folderName of pathParts) {
+      currentFolderName = folderName;
+      
+      const url = `${QUARK_PC_API}/file/sort`;
+      const params = new URLSearchParams({
+        ...BASE_PARAMS,
+        pdir_fid: currentPdirFid,
+        _page: '1',
+        _size: '100',
+        _sort: 'file_type:asc,updated_at:desc'
+      });
+
+      const response = await fetch(`${url}?${params}`, {
+        method: 'GET',
+        headers: this.headers
+      });
+
+      const data = await response.json();
+      
+      if (data.code !== 0) {
+        throw new Error(data.message || '获取文件列表失败');
+      }
+
+      const folders = data.data.list || [];
+      const existingFolder = folders.find(f => f.file_type === 0 && f.file_name === folderName);
+      
+      if (existingFolder) {
+        currentPdirFid = existingFolder.fid;
+      } else {
+        const newFolder = await this.createFolder(folderName, currentPdirFid);
+        currentPdirFid = newFolder.fid;
+      }
     }
 
-    const folders = data.data.list || [];
-    const existingFolder = folders.find(f => f.file_type === 0 && f.file_name === folderName);
-    
-    if (existingFolder) {
-      return existingFolder.fid;
-    }
-
-    const newFolder = await this.createFolder(folderName, '0');
-    return newFolder.fid;
+    return currentPdirFid;
   }
 
   async saveShareFiles(pwdId, stoken, fids, fidTokens, toFolderId) {
@@ -279,32 +315,43 @@ class QuarkDirectLink {
     return data.data;
   }
 
-  async cleanSaveFolder() {
-    const folderName = 'quarkapi';
+  async cleanSaveFolder(folderPath = '/quarkapi') {
+    const pathParts = folderPath.split('/').filter(Boolean);
     
-    const url = `${QUARK_PC_API}/file/sort`;
-    const params = new URLSearchParams({
-      ...BASE_PARAMS,
-      pdir_fid: '0',
-      _page: '1',
-      _size: '100',
-      _sort: 'file_type:asc,updated_at:desc'
-    });
-
-    const response = await fetch(`${url}?${params}`, {
-      method: 'GET',
-      headers: this.headers
-    });
-
-    const data = await response.json();
+    let currentPdirFid = '0';
+    let saveFolder = null;
     
-    if (data.code !== 0) {
-      throw new Error(data.message || '获取文件列表失败');
+    for (const folderName of pathParts) {
+      const url = `${QUARK_PC_API}/file/sort`;
+      const params = new URLSearchParams({
+        ...BASE_PARAMS,
+        pdir_fid: currentPdirFid,
+        _page: '1',
+        _size: '100',
+        _sort: 'file_type:asc,updated_at:desc'
+      });
+
+      const response = await fetch(`${url}?${params}`, {
+        method: 'GET',
+        headers: this.headers
+      });
+
+      const data = await response.json();
+      
+      if (data.code !== 0) {
+        throw new Error(data.message || '获取文件列表失败');
+      }
+
+      const folders = data.data.list || [];
+      saveFolder = folders.find(f => f.file_type === 0 && f.file_name === folderName);
+      
+      if (!saveFolder) {
+        return { deleted: 0, message: '转存文件夹不存在' };
+      }
+      
+      currentPdirFid = saveFolder.fid;
     }
 
-    const folders = data.data.list || [];
-    const saveFolder = folders.find(f => f.file_type === 0 && f.file_name === folderName);
-    
     if (!saveFolder) {
       return { deleted: 0, message: '转存文件夹不存在' };
     }
@@ -418,7 +465,7 @@ class QuarkDirectLink {
     return videoFiles;
   }
 
-  async getDirectLinks(shareUrl, passcode = '') {
+  async getDirectLinks(shareUrl, passcode = '', saveFolderPath = '/quarkapi') {
     const pwdId = this.extractPwdId(shareUrl);
     if (!pwdId) {
       throw new Error('无效的夸克分享链接');
@@ -430,7 +477,7 @@ class QuarkDirectLink {
       return [];
     }
 
-    const saveFolderId = await this.findOrCreateSaveFolder();
+    const saveFolderId = await this.findOrCreateSaveFolder(saveFolderPath);
     
     const fids = videoFiles.map(f => f.fid);
     const fidTokens = videoFiles.map(f => f.shareFidToken);
