@@ -890,13 +890,15 @@ app.get('/api.php/provide/vod', async (req, res) => {
                   validItems.push(item);
                   log(`有效: ${cleanUrl.substring(0, 40)}... (${videos.length}个视频)`);
                 } else {
-                  invalidLinks[cleanUrl] = Date.now();
-                  log(`失效: ${cleanUrl.substring(0, 40)}... (无视频)`);
-                }
-              } else {
                 invalidLinks[cleanUrl] = Date.now();
-                log(`失效: ${cleanUrl.substring(0, 40)}... (无播放地址)`);
+                saveInvalidLinks();
+                log(`失效: ${cleanUrl.substring(0, 40)}... (无视频)`);
               }
+              } else {
+              invalidLinks[cleanUrl] = Date.now();
+              saveInvalidLinks();
+              log(`失效: ${cleanUrl.substring(0, 40)}... (无播放地址)`);
+            }
             } else {
               invalidLinks[cleanUrl] = Date.now();
               log(`失效: ${cleanUrl.substring(0, 40)}... (未找到详情)`);
